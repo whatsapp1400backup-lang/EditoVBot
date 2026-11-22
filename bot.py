@@ -393,13 +393,15 @@ async def on_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         HELP_TEXT, reply_markup=main_menu_markup())
 
 
-async def edit_status(query, text: str, markup=None) -> None:
-    """ویرایش پیام وضعیت؛ برای پیام ویدیویی کپشن را عوض می‌کند."""
+async def edit_status(query, text: str, markup=None, parse_mode=None) -> None:
+    """ویرایش پیام وضعیت؛ برای پیام عکس/ویدیویی کپشن را عوض می‌کند."""
     try:
-        await query.edit_message_text(text, reply_markup=markup)
+        await query.edit_message_text(text, reply_markup=markup,
+                                      parse_mode=parse_mode)
     except Exception:
         try:
-            await query.edit_message_caption(caption=text, reply_markup=markup)
+            await query.edit_message_caption(caption=text, reply_markup=markup,
+                                             parse_mode=parse_mode)
         except Exception:
             pass
 
@@ -422,30 +424,34 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if data == "help":
-        await query.edit_message_text(HELP_TEXT, reply_markup=main_menu_markup(), parse_mode="Markdown")
+        await edit_status(query, HELP_TEXT, main_menu_markup(),
+                          parse_mode="Markdown")
         return
 
     if data.startswith("mode:"):
         mode = data.split(":", 1)[1]
         users[uid]["mode"] = mode
         label = {"normal": "ویدیوی معمولی", "shorts": "شورتس"}.get(mode, mode)
-        await query.edit_message_text(
+        await edit_status(
+            query,
             f"باشه، {label} رو انتخاب کردی.\nحالا ویدیوت رو بفرست 🎬",
-            reply_markup=main_menu_markup(), parse_mode="Markdown",
+            main_menu_markup(), parse_mode="Markdown",
         )
         return
 
     if data == "download_link":
         users[uid]["awaiting_link"] = True
-        await query.edit_message_text(
+        await edit_status(
+            query,
             "لینک ویدیو رو بفرست — یوتیوب، ریلز اینستاگرام یا آپارات.",
-            reply_markup=main_menu_markup())
+            main_menu_markup())
         return
 
     if data == "reels":
-        await query.edit_message_text(
+        await edit_status(
+            query,
             "ریلز کدوم رو ببینی؟",
-            reply_markup=reels_menu_markup())
+            reels_menu_markup())
         return
 
     if data in ("reels:yt", "reels:aparat"):
@@ -470,7 +476,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not job or job["id"] != job_id or not Path(job["src"]).exists():
             await query.answer("ویدیو رو پیدا نکردم؛ دوباره بفرست.", show_alert=True)
             return
-        await query.edit_message_text("دارم صداش رو جدا می‌کنم… 🎵")
+        await edit_status(query, "دارم صداش رو جدا می‌کنم… 🎵")
         asyncio.create_task(run_audio(query, uid, job))
         return
 
@@ -480,7 +486,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not job or job["id"] != job_id or not Path(job["src"]).exists():
             await query.answer("ویدیو رو پیدا نکردم؛ دوباره بفرست.", show_alert=True)
             return
-        await query.edit_message_text("دارم تبدیلش می‌کنم… ⏳")
+        await edit_status(query, "دارم تبدیلش می‌کنم… ⏳")
         asyncio.create_task(run_convert(query, uid, job, mode))
         return
 
@@ -580,17 +586,17 @@ async def run_convert(query, uid: int, job: dict, mode: str) -> None:
                 "فرمت: MP4\n\n"
                 "می‌تونی مستقیم منتشرش کنی."
             )
-        await query.edit_message_text("دارم می‌فرستمش… 📤")
+        await edit_status(query, "دارم می‌فرستمش… 📤")
         with open(out, "rb") as f:
             await query.message.reply_video(video=f, caption=caption, filename=f"aparat_{mode}.mp4")
         await query.message.delete()
     except subprocess.CalledProcessError:
-        await query.edit_message_text(
+        await edit_status(query,
             "این فرمت رو نمی‌تونم تبدیل کنم؛ با MP4 بفرست."
         )
     except Exception:
         try:
-            await query.edit_message_text("یه مشکلی پیش اومد، دوباره بفرست.")
+            await edit_status(query, "یه مشکلی پیش اومد، دوباره بفرست.")
         except Exception:
             pass
     finally:
@@ -612,7 +618,7 @@ async def run_audio(query, uid: int, job: dict) -> None:
         await query.message.delete()
     except Exception:
         try:
-            await query.edit_message_text("یه مشکلی پیش اومد، دوباره بفرست.")
+            await edit_status(query, "یه مشکلی پیش اومد، دوباره بفرست.")
         except Exception:
             pass
     finally:
