@@ -3,3 +3,4 @@
 *.session-journal
 tmp/
 __pycache__/
+.venv/

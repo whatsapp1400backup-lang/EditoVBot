@@ -12,51 +12,59 @@ Edito_VBot — ربات تبدیل ویدیو برای آپارات
     • فشرده:  1280x720 با حجم کمتر
     • حجم خروجی همیشه زیر ۱/۵ گیگابایت (سقف حساب معمولی آپارات)
 
-چرا Telethon (نه Bot API معمولی)؟
-  Bot API استاندارد فقط فایل تا حدود ۲۰ مگابایت را با getFile می‌دهد،
-  ولی Telethon با MTProto ویدیو تا سقف ۲ گیگابایت تلگرام را دانلود
-  و ارسال می‌کند.
+چرا Bot API (نه Telethon)؟
+  اتصال مستقیم MTProto از این سرور بسته است (تلاش با Telethon هنگام
+  ساخت کلید احراز هویت قطع می‌شود)، ولی فراخوانی HTTPS به
+  api.telegram.org بدون مشکل کار می‌کند. پس ربات با
+  python-telegram-bot نسخه ۲۱ و polling روی Bot API اجرا می‌شود.
+
+⚠️ محدودیت صادقانه‌ی Bot API:
+  تلگرام به ربات‌ها فقط اجازه می‌دهد فایل تا حدود ۲۰ مگابایت را با
+  getFile دانلود کنند. ویدیوی بزرگ‌تر از ۲۰ مگابایت دانلود نمی‌شود و
+  ربات به‌صراحت همین را به کاربر می‌گوید. برای ویدیوی بزرگ‌تر باید
+  اول فشرده‌اش کرد یا تکه‌تکه فرستاد.
 
 متغیرهای محیطی (هیچ توکنی داخل کد نیست):
   BOT_TOKEN        توکن ربات از BotFather (اجباری)
-  API_ID           از my.telegram.org (اجباری)
-  API_HASH         از my.telegram.org (اجباری)
   MAX_CONCURRENT   تعداد تبدیل هم‌زمان (پیش‌فرض 1)
   TMP_DIR          پوشه‌ی فایل‌های موقت (پیش‌فرض ./tmp)
 """
 
 import asyncio
 import json
-import math
 import os
 import shutil
 import subprocess
 import sys
-import time
 import uuid
 from pathlib import Path
 
-from telethon import Button, TelegramClient, events
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 # ---------------------------------------------------------------- تنظیمات
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-API_ID = int(os.environ.get("API_ID", "0") or 0)
-API_HASH = os.environ.get("API_HASH", "").strip()
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1") or 1)
 TMP_DIR = Path(os.environ.get("TMP_DIR", "./tmp"))
 
-# سقف‌های آپارات و تلگرام (بایت)
+# سقف‌های آپارات و Bot API تلگرام (بایت)
 APARAT_MAX_BYTES = int(1.5 * 1024 ** 3)      # ۱/۵ گیگابایت — سقف امن آپارات
-TELEGRAM_MAX_BYTES = int(2 * 1024 ** 3)      # ۲ گیگابایت — سقف ارسال تلگرام
+BOT_API_MAX_BYTES = 20 * 1024 * 1024         # ۲۰ مگابایت — سقف دانلود ربات در Bot API
 SHORTS_MAX_SECONDS = 5 * 60                  # شورتس از گالری: حداکثر ۵ دقیقه
 
-if not BOT_TOKEN or not API_ID or not API_HASH:
-    print("خطا: متغیرهای BOT_TOKEN و API_ID و API_HASH را تنظیم کنید.", file=sys.stderr)
+if not BOT_TOKEN:
+    print("خطا: متغیر BOT_TOKEN را تنظیم کنید.", file=sys.stderr)
     sys.exit(1)
 
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-client = TelegramClient("edito_vbot", API_ID, API_HASH)
 semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 # وضعیت هر کاربر: {user_id: {"mode": "normal"|"shorts"|None, "job": {...}}}
@@ -142,14 +150,13 @@ def convert(src: Path, dst: Path, profile: dict, crf: int | None = None) -> None
     subprocess.run(cmd, check=True, timeout=7200)
 
 
-async def convert_safe(src: Path, dst: Path, profile: dict) -> Path:
-    """تبدیل در ترد جدا + اگر خروجی از سقف آپارات بزرگ‌تر شد، دوباره با CRF بالاتر."""
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, convert, src, dst, profile)
+def convert_safe(src: Path, dst: Path, profile: dict) -> Path:
+    """تبدیل + اگر خروجی از سقف آپارات بزرگ‌تر شد، دوباره با CRF بالاتر."""
+    convert(src, dst, profile)
     if dst.stat().st_size > APARAT_MAX_BYTES:
         # مرحله‌ی دوم: فشرده‌تر تا زیر سقف آپارات برود
         tmp2 = dst.with_suffix(".small.mp4")
-        await loop.run_in_executor(None, convert, src, tmp2, profile, profile["crf"] + 6)
+        convert(src, tmp2, profile, profile["crf"] + 6)
         if tmp2.stat().st_size < dst.stat().st_size:
             tmp2.replace(dst)
         else:
@@ -157,12 +164,12 @@ async def convert_safe(src: Path, dst: Path, profile: dict) -> Path:
     return dst
 
 
-def main_menu_buttons():
-    return [
-        [Button.inline("🎬 تبدیل معمولی آپارات (16:9)", b"mode:normal")],
-        [Button.inline("📱 تبدیل شورتس آپارات (9:16)", b"mode:shorts")],
-        [Button.inline("ℹ️ راهنما", b"help")],
-    ]
+def main_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 تبدیل معمولی آپارات (16:9)", callback_data="mode:normal")],
+        [InlineKeyboardButton("📱 تبدیل شورتس آپارات (9:16)", callback_data="mode:shorts")],
+        [InlineKeyboardButton("ℹ️ راهنما", callback_data="help")],
+    ])
 
 
 START_TEXT = """سلام! 👋 من **Edito** هستم — ربات تبدیل ویدیو برای آپارات 🎬
@@ -172,6 +179,8 @@ START_TEXT = """سلام! 👋 من **Edito** هستم — ربات تبدیل �
 ✅ معمولی: 1920×1080 ‏(16:9)
 ✅ شورتس: 720×1280 ‏(9:16)
 ✅ حجم زیر ۱/۵ گیگابایت (سقف حساب معمولی آپارات)
+
+⚠️ ویدیوی ورودی باید حداکثر ۲۰ مگابایت باشد (محدودیت تلگرام برای ربات‌ها).
 
 اول حالت رو انتخاب کن، یا مستقیم ویدیو رو بفرست 👇"""
 
@@ -189,38 +198,40 @@ HELP_TEXT = """ℹ️ **راهنمای Edito**
 • فرمت/کدک غیراستاندارد — آپارات MP4 با H.264 و AAC می‌خواهد
 • ابعاد غیراستاندارد — خروجی من دقیقاً 1920×1080 یا 720×1280 است
 
-⚠️ محدودیت تلگرام: ویدیوی ورودی حداکثر ۲ گیگابایت.
+⚠️ **محدودیت مهم:** تلگرام به ربات‌ها فقط اجازه‌ی دانلود فایل تا
+۲۰ مگابایت را می‌دهد. اگر ویدیوت بزرگ‌تر است، اول فشرده‌اش کن
+(مثلاً با همین ربات؟ نه — با یک اپ فشرده‌سازی ویدیو) یا تکه‌تکه بفرست.
 """
 
 
 # ---------------------------------------------------------------- هندلرها
-@client.on(events.NewMessage(pattern=r"^/(start|help)"))
-async def on_start(event):
-    uid = event.sender_id
+async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
     users.setdefault(uid, {"mode": None, "job": None})
-    if event.raw_text.startswith("/help"):
-        await event.reply(HELP_TEXT, buttons=main_menu_buttons())
-    else:
-        await event.reply(START_TEXT, buttons=main_menu_buttons())
+    text = HELP_TEXT if update.message.text.startswith("/help") else START_TEXT
+    await update.message.reply_text(
+        text, reply_markup=main_menu_markup(), parse_mode="Markdown"
+    )
 
 
-@client.on(events.CallbackQuery)
-async def on_callback(event):
-    data = event.data.decode()
-    uid = event.sender_id
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    uid = update.effective_user.id
     users.setdefault(uid, {"mode": None, "job": None})
 
     if data == "help":
-        await event.edit(HELP_TEXT, buttons=main_menu_buttons())
+        await query.edit_message_text(HELP_TEXT, reply_markup=main_menu_markup(), parse_mode="Markdown")
         return
 
     if data.startswith("mode:"):
         mode = data.split(":", 1)[1]
         users[uid]["mode"] = mode
         label = {"normal": "معمولی (16:9)", "shorts": "شورتس (9:16)"}.get(mode, mode)
-        await event.edit(
+        await query.edit_message_text(
             f"✅ حالت **{label}** انتخاب شد.\nحالا ویدیوت رو بفرست 🎬",
-            buttons=main_menu_buttons(),
+            reply_markup=main_menu_markup(), parse_mode="Markdown",
         )
         return
 
@@ -228,54 +239,51 @@ async def on_callback(event):
         _, job_id, mode = data.split(":")
         job = users[uid].get("job")
         if not job or job["id"] != job_id or not Path(job["src"]).exists():
-            await event.answer("⚠️ ویدیو پیدا نشد؛ دوباره بفرست.", alert=True)
+            await query.answer("⚠️ ویدیو پیدا نشد؛ دوباره بفرست.", show_alert=True)
             return
-        await event.edit("⏳ در حال تبدیل ویدیو... لطفاً صبر کن 🎬")
-        asyncio.create_task(run_convert(event, uid, job, mode))
+        await query.edit_message_text("⏳ در حال تبدیل ویدیو... لطفاً صبر کن 🎬")
+        asyncio.create_task(run_convert(query, uid, job, mode))
         return
 
 
-@client.on(events.NewMessage(func=lambda e: e.video or (e.document and e.document.mime_type and e.document.mime_type.startswith("video/"))))
-async def on_video(event):
-    uid = event.sender_id
+async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    msg = update.message
+    uid = update.effective_user.id
     users.setdefault(uid, {"mode": None, "job": None})
 
-    # حجم ورودی — سقف تلگرام ۲ گیگابایت
-    size = event.file.size or 0
-    if size > TELEGRAM_MAX_BYTES:
-        await event.reply(
-            "⚠️ حجم ویدیو بیشتر از ۲ گیگابایت است و تلگرام اجازه‌ی دانلود نمی‌دهد.\n"
-            "لطفاً ویدیوی کوچک‌تری بفرست."
+    media = msg.video or msg.document
+    size = getattr(media, "file_size", 0) or 0
+
+    # سقف واقعی Bot API: ربات فقط تا ~۲۰ مگابایت می‌تواند دانلود کند
+    if size > BOT_API_MAX_BYTES:
+        await msg.reply_text(
+            "⚠️ حجم این ویدیو بیشتر از ۲۰ مگابایت است.\n\n"
+            "تلگرام به ربات‌ها فقط اجازه می‌دهد فایل تا ۲۰ مگابایت را دانلود "
+            "کنند، پس نمی‌توانم این ویدیو را بگیرم.\n\n"
+            "لطفاً ویدیو را اول فشرده کن (با یک اپ فشرده‌سازی ویدیو) یا "
+            "تکه‌تکه بفرست تا زیر ۲۰ مگابایت باشد، بعد دوباره بفرست 🎬"
         )
         return
 
     job_id = uuid.uuid4().hex[:8]
     work = TMP_DIR / f"{uid}_{job_id}"
     work.mkdir(parents=True, exist_ok=True)
-    src = work / "input"
-    status = await event.reply(
+    src = work / "input.mp4"
+    status = await msg.reply_text(
         f"📥 در حال دانلود ویدیو... (‏{fa_size(size)}‏)\nلطفاً صبر کن ⏳"
     )
 
-    # دانلود با Telethon — تا ۲ گیگابایت، با نمایش پیشرفت
-    last_edit = [0.0]
-    last_pct = [-1]
-
-    def progress(downloaded, total):
-        now = time.time()
-        pct = int(downloaded / total * 100) if total else 0
-        if pct != last_pct[0] and now - last_edit[0] > 3:
-            last_pct[0] = pct
-            last_edit[0] = now
-            asyncio.ensure_future(
-                status.edit(f"📥 در حال دانلود... {pct}٪ ‏(‏{fa_size(downloaded)} از {fa_size(total)}‏)")
-            )
-
     try:
-        await event.download_media(file=str(src), progress_callback=progress)
+        tg_file = await context.bot.get_file(media.file_id)
+        await tg_file.download_to_drive(str(src))
     except Exception as e:
         shutil.rmtree(work, ignore_errors=True)
-        await status.edit(f"❌ دانلود ناموفق بود.\nدوباره تلاش کن.\n`{e}`")
+        await status.edit_text(
+            "❌ دانلود ناموفق بود.\n"
+            "اگر حجم ویدیو نزدیک ۲۰ مگابایت است، نسخه‌ی کوچک‌تری بفرست.\n"
+            f"`{e}`",
+            parse_mode="Markdown",
+        )
         return
 
     # بررسی مشخصات ویدیو
@@ -290,30 +298,30 @@ async def on_video(event):
     if info["duration"] > SHORTS_MAX_SECONDS:
         warn = "\n⚠️ مدت ویدیو بیشتر از ۵ دقیقه است؛ برای شورتس آپارات مناسب نیست."
 
-    await status.edit(
+    await status.edit_text(
         "✅ ویدیو دریافت شد!\n\n"
         f"📐 ابعاد: {info['width']}×{info['height']}\n"
         f"⏱ مدت: {fa_time(info['duration'])}\n"
         f"💾 حجم: {fa_size(info['size'])}{warn}\n\n"
         "حالت خروجی را انتخاب کن 👇",
-        buttons=[
-            [Button.inline("🎬 معمولی آپارات — 1080p ‏(16:9)", f"convert:{job_id}:normal".encode())],
-            [Button.inline("📱 شورتس آپارات — 720p ‏(9:16)", f"convert:{job_id}:shorts".encode())],
-            [Button.inline("🗜️ فشرده کم‌حجم — 720p ‏(16:9)", f"convert:{job_id}:compact".encode())],
-        ],
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 معمولی آپارات — 1080p ‏(16:9)", callback_data=f"convert:{job_id}:normal")],
+            [InlineKeyboardButton("📱 شورتس آپارات — 720p ‏(9:16)", callback_data=f"convert:{job_id}:shorts")],
+            [InlineKeyboardButton("🗜️ فشرده کم‌حجم — 720p ‏(16:9)", callback_data=f"convert:{job_id}:compact")],
+        ]),
     )
 
 
-async def run_convert(event, uid, job, mode):
+async def run_convert(query, uid: int, job: dict, mode: str) -> None:
     profile = PROFILES[mode]
     work = Path(job["work"])
     src = Path(job["src"])
     dst = work / f"aparat_{mode}.mp4"
-    status_msg = event  # پیام ویرایش‌شده‌ی وضعیت
 
     try:
         async with semaphore:
-            out = await convert_safe(src, dst, profile)
+            loop = asyncio.get_running_loop()
+            out = await loop.run_in_executor(None, convert_safe, src, dst, profile)
         info = await asyncio.get_running_loop().run_in_executor(None, probe, out)
         caption = (
             "✅ آماده‌ی آپارات! 🎬\n\n"
@@ -323,42 +331,44 @@ async def run_convert(event, uid, job, mode):
             "🎞 فرمت: MP4 ‏(H.264 + AAC)‏\n\n"
             "حالا می‌توانی مستقیم در آپارات آپلودش کنی 🚀"
         )
-        await status_msg.edit("📤 در حال ارسال فایل آماده... 🚀")
-        await client.send_file(
-            event.chat_id, str(out),
-            caption=caption,
-            force_document=False,
-        )
-        await status_msg.delete()
+        await query.edit_message_text("📤 در حال ارسال فایل آماده... 🚀")
+        with open(out, "rb") as f:
+            await query.message.reply_video(video=f, caption=caption, filename=f"aparat_{mode}.mp4")
+        await query.message.delete()
     except subprocess.CalledProcessError:
-        await status_msg.edit(
+        await query.edit_message_text(
             "❌ تبدیل ناموفق بود؛ فرمت ویدیو پشتیبانی نمی‌شود.\n"
             "ویدیو را با فرمت دیگری (مثلاً MP4) بفرست."
         )
     except Exception as e:
-        await status_msg.edit(f"❌ خطایی رخ داد:\n`{e}`\nدوباره تلاش کن.")
+        try:
+            await query.edit_message_text(f"❌ خطایی رخ داد:\n`{e}`\nدوباره تلاش کن.", parse_mode="Markdown")
+        except Exception:
+            pass
     finally:
         shutil.rmtree(work, ignore_errors=True)
         users[uid]["job"] = None
 
 
-@client.on(events.NewMessage)
-async def on_other(event):
+async def on_other(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """پیام‌های غیر ویدیویی — راهنمایی کوتاه."""
-    if event.raw_text.startswith("/"):
+    if update.message.video or update.message.document:
         return
-    if not (event.video or event.document):
-        await event.reply(
-            "🎬 لطفاً یک ویدیو بفرست تا برای آپارات آماده‌اش کنم.\n"
-            "برای راهنما /help را بزن.",
-            buttons=main_menu_buttons(),
-        )
+    await update.message.reply_text(
+        "🎬 لطفاً یک ویدیو بفرست تا برای آپارات آماده‌اش کنم.\n"
+        "برای راهنما /help را بزن.",
+        reply_markup=main_menu_markup(),
+    )
 
 
-def main():
+def main() -> None:
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler(["start", "help"], on_start))
+    app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, on_video))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_other))
     print("Edito_VBot در حال اجرا... (@Edito_VBot)")
-    client.start(bot_token=BOT_TOKEN)
-    client.run_until_disconnected()
+    app.run_polling()
 
 
 if __name__ == "__main__":

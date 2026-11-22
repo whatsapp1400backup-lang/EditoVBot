@@ -1,1 +1,1 @@
-telethon>=1.36
+python-telegram-bot>=21
