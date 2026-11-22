@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+# ffmpeg برای تبدیل ویدیو
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY bot.py .
+
+# پوشه‌ی فایل‌های موقت
+RUN mkdir -p /app/tmp
+ENV TMP_DIR=/app/tmp
+
+CMD ["python", "bot.py"]
